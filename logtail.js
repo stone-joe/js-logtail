@@ -36,7 +36,7 @@ export default class LogTail extends HTMLElement {
     ];
   }
 
-  attributeChangedCallback(name) {
+  attributeChangedCallback(name, oldValue) {
     switch(name) {
       case ATTR_PAUSED:
         if (this.paused && this._timeout) {
@@ -44,6 +44,16 @@ export default class LogTail extends HTMLElement {
         } else {
           this.getLog();
         }
+        break;
+      case ATTR_LOADING:
+        // do not allow this value to change - it's READONLY
+        this._loading = oldValue;
+        console.warn(`Attempted to change READONLY attribute ${ATTR_LOADING}`);
+        break;
+      case ATTR_LOG_FILE_SIZE:
+        // do not allow this value to change - it's READONLY
+        this._logFileSize = oldValue;
+        console.warn(`Attempted to change READONLY attribute ${ATTR_LOG_FILE_SIZE}`);
         break;
     }
   }
@@ -56,18 +66,41 @@ export default class LogTail extends HTMLElement {
     return v;
   }
 
+  /**
+   * Helper method for performing a HEAD request to get the total size of the log
+   * @returns {Promise<number, Error>}
+   */
+  async requestLogSize() {
+    try {
+      const response = await fetch(this.url, {
+        method: 'HEAD'
+      });
+      if (response.ok) {
+        if (!response.headers.has('Content-Length')) {
+          throw new MissingContentLengthHeaderError('Server did not respond with a Content-Length header');
+        } else {
+          return response.headers.get('Content-Length') * 1;
+        }
+      } else {
+        throw new RangeError(`Server responded with non-ok status code: ${response.status} :: ${response.statusText}`);
+      }
+    } catch (e) {
+      throw new HeadRequestError(e);
+    }
+  }
+
   async getLog() {
     if (this.pause || this.loading){
       return;
     }
-    this.loading = true;
+    this._loading = true;
 
     let range;
     let firstLoad;
     let mustGet206;
-    if (this.logFileSize === 0) {
+    if (!this.logFileSize) {
       /* Get the last 'load' bytes */
-      range = '-' + this.load.toString();
+      range = '-' + this.loadBytes.toString();
       firstLoad = true;
       mustGet206 = false;
     } else {
@@ -90,7 +123,7 @@ export default class LogTail extends HTMLElement {
         },
       });
       const xhr = response.clone();
-      this.loading = false;
+      this._loading = false;
       let contentSize;
   
       if (xhr.status === 206) {
@@ -103,27 +136,28 @@ export default class LogTail extends HTMLElement {
               value: xhr.headers.get(headerName),
             });
           }
-          this.dispatchEvent(MissingContentRangeHeaderErrorEvent.name, new MissingContentRangeHeaderErrorEvent(actualHeaders));
+          this.dispatchEvent(new MissingContentRangeHeaderErrorEvent(actualHeaders));
           return;
         }
   
-        this.logFileSize = this.parseInt2(c_r.split('/')[1]);
+        this.setAttribute(ATTR_LOG_FILE_SIZE, this.parseInt2(c_r.split('/')[1]));
         contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
       } else if (xhr.status === 200) {
         if (mustGet206) {
-          this.dispatchEvent(Non206ResponseErrorEvent.name, new Non206ResponseErrorEvent(xhr.status, xhr.statusText));
+          this.dispatchEvent(new Non206ResponseErrorEvent(xhr.status, xhr.statusText));
           return;
         }
   
-        contentSize = this.logFileSize = this.parseInt2(xhr.headers.get('Content-Length'));
+        contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
+        this.setAttribute(ATTR_LOG_FILE_SIZE, contentSize);
       } else {
-        this.dispatchEvent(UnexpectedServerResponseErrorEvent.name, new UnexpectedServerResponseErrorEvent(xhr.status, xhr.statusText));
+        this.dispatchEvent(new UnexpectedServerResponseErrorEvent(xhr.status, xhr.statusText));
         return;
       }
   
       const data = await xhr.text();
-      if (firstLoad && data.length > this.load) {
-        this.dispatchEvent(ServerResponseTooLongErrorEvent.name, new ServerResponseTooLongErrorEvent(data.length, data));
+      if (firstLoad && data.length > this.loadBytes) {
+        this.dispatchEvent(new ServerResponseTooLongErrorEvent(data.length, data));
         return;
       }
   
@@ -139,17 +173,17 @@ export default class LogTail extends HTMLElement {
         /* Drop the first byte (see above) */
         this.logData += data.substring(1);
   
-        if (this.logData.length > this.load) {
-          const start = this.logData.indexOf('\n', this.logData.length - this.load);
+        if (this.logData.length > this.loadBytes) {
+          const start = this.logData.indexOf('\n', this.logData.length - this.loadBytes);
           this.logData = this.logData.substring(start + 1);
         }
       }
   
-      this.dispatchEvent(DataAppendedEvent.name, new DataAppendedEvent(data));
-      this._timeout = setTimeout(this.getLog, this.pollInterval);
+      this.dispatchEvent(new DataAppendedEvent(data));
+      this._timeout = setTimeout(this.getLog.bind(this), this.pollInterval);
     } catch (e) {
       this.pause = true;
-      this.dispatchEvent(FetchErrorEvent.name, new FetchErrorEvent('Fetching the log file failed. This may be due to a network error. Please try again in a few minutes', e));
+      this.dispatchEvent(new FetchErrorEvent('Fetching the log file failed. This may be due to a network error. Please try again in a few minutes', e));
     }
   }
 
@@ -158,6 +192,22 @@ export default class LogTail extends HTMLElement {
    */
   get loading() {
     return this.hasAttribute(ATTR_LOADING);
+  }
+
+  /**
+   * @private
+   * @returns {boolean} Internal flag for checking the loading state of the component. The value is reflected to the attribute
+   */
+  get _loading() {
+    return this.loading;
+  }
+
+  set _loading(_loading=false) {
+    if (_loading) {
+      this.setAttribute(ATTR_LOADING, _loading);
+    } else {
+      this.removeAttribute(ATTR_LOADING);
+    }
   }
 
   /**
@@ -179,7 +229,7 @@ export default class LogTail extends HTMLElement {
    * @returns {number} The number of bytes to load on each request. Defaults to 30kb
    */
   get loadBytes() {
-    return this.getAttribute(ATTR_LOAD);
+    return this.getAttribute(ATTR_LOAD) || defaultOpts.load;
   }
 
   set loadBytes(loadBytes=30 * 1024) {
@@ -226,6 +276,22 @@ export default class LogTail extends HTMLElement {
    */
   get logFileSize() {
     return this.hasAttribute(ATTR_LOG_FILE_SIZE) ? this.getAttribute(ATTR_LOG_FILE_SIZE) * 1 : null;
+  }
+
+  /**
+   * @private
+   * @returns {number} The size of the file in bytes. This property is used to enforce the readonly nature of this value.
+   */
+  get _logFileSize() {
+    return this.logFileSize;
+  }
+
+  set _logFileSize(_logFileSize) {
+    if (Number.isInteger(_logFileSize) && !Number.isNaN(_logFileSize) && Number.isFinite(_logFileSize) && _logFileSize > 0) {
+      this.setAttribute(ATTR_LOG_FILE_SIZE, _logFileSize);
+    } else {
+      throw new TypeError(`Attribute ${ATTR_LOG_FILE_SIZE} must be a positive, finite, integer, not ${_logFileSize}`);
+    }
   }
 }
 
@@ -358,6 +424,24 @@ export class MissingContentRangeHeaderErrorEvent extends CustomEvent {
       composed: true,
       detail: headers,
     });
+  }
+}
+
+/**
+ * An error that's thrown if the server doesn't respond to the HEAD request with a Content-Length
+ */
+export class MissingContentLengthHeaderError extends Error {}
+/**
+ * An error that's thrown if the HEAD request fails due to network or other non-application errors
+ */
+export class HeadRequestError extends Error {
+  constructor(e) {
+    super(e.message);
+    this.error = e;
+  }
+
+  get stack() {
+    return `${super.stack}${this.error ? `\n\t Caused by ... ${this.error.stack}` : ''}`;
   }
 }
 

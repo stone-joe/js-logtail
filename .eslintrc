@@ -15,6 +15,7 @@
     "indent": ["error", 2, {
       "SwitchCase": 1
     }],
+    "no-console": ["off"],
     "quotes": ["error", "single"],
     "semi": ["error", "always"],
     "space-before-function-paren": ["error", {

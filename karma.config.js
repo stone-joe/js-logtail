@@ -3,11 +3,16 @@ module.exports = function(config) {
     frameworks: ['mocha', 'chai'],
     files: [
       {
-        file: './logtail.js',
+        pattern: './logtail.js',
         type: 'module',
         included: true,
+        watched: true,
       },
-      'test/**/*.js',
+      {
+        pattern: './test/test.log',
+        served: true,
+      },
+      'test/**/*Spec.js',
     ],
     reporters: ['progress'],
     port: 9876,  // karma web server port
@@ -16,5 +21,8 @@ module.exports = function(config) {
     browsers: ['ChromeHeadless'],
     autoWatch: false,
     concurrency: Infinity,
+    proxies: {
+      '/weblog': '/base/tests/test.log',
+    },
   });
 };
