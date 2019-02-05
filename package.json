@@ -8,14 +8,14 @@
   },
   "scripts": {
     "lint": "./node_modules/.bin/eslint logtail.js",
-    "test": "./node_modules/.bin/karma start",
-    "test:single": "./node_modules/.bin/karma start --single-run",
+    "test:unit": "./node_modules/.bin/mocha -r esm -r tests/globals.js tests/*.spec.js",
     "start": "node server.js"
   },
   "license": "MIT",
   "devDependencies": {
     "chai": "^4.2.0",
     "eslint": "^5.13.0",
+    "esm": "^3.2.1",
     "express": "^4.16.4",
     "karma": "^4.0.0",
     "karma-chai": "^0.1.0",
@@ -24,6 +24,7 @@
     "karma-sinon": "^1.0.5",
     "karma-sinon-chai": "^2.0.2",
     "mocha": "^5.2.0",
+    "node-fetch": "^2.3.0",
     "range-parser": "^1.2.0",
     "sinon": "^7.2.3"
   }

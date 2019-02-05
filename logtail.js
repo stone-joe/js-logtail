@@ -25,7 +25,6 @@ export default class LogTail {
   constructor(opts = {}) {
     Object.assign(this, defaultOpts, opts);
     this._listeners = {};
-    this.f = this.getLog.bind(this);
   }
 
   /**
@@ -117,115 +116,143 @@ export default class LogTail {
     }
   }
 
+  f() {
+    this.poll();
+  }
+
   /**
-   * Starts polling for the end of the file. New content is emitted after the initial 30kb are provided
+   * Continuously polls for new log data. It'll emit events as data is recieved or if errors occur
    */
-  async getLog() {
+  async poll() {
     try {
       if (this.pause || this.loading) {
-        this.console.info(`${this.getLog.name}: poller is paused (this.pause: ${this.pause}, this.loading: ${this.loading}). Not tailing log ${this.url}`);
+        this.console.info(`${this.poll.name}: poller is paused (this.pause: ${this.pause}, this.loading: ${this.loading}). Not tailing log ${this.url}`);
         return;
       }
-      this.console.info(`${this.getLog.name}: tailing log ${this.url}`);
+      this.console.info(`${this.poll.name}: tailing log ${this.url}`);
       this._loading = true;
-
-      let range;
-      let firstLoad;
-      let mustGet206;
-      if (!this.logFileSize) {
-        this.console.debug(`${this.getLog.name}: no file size yet, meaning it's the first request. Getting the current size of the log`);
-        this._logFileSize = await this.requestLogSize();
-        /* Get the last 'load' bytes */
-        range = '-' + (this.loadBytes > this.logFileSize ? this.logFileSize.toString() : this.loadBytes.toString());
-        firstLoad = true;
-        mustGet206 = false;
-      } else {
-        /* Get the (this.logFileSize - 1)th byte, onwards. */
-        range = (this.logFileSize - 1).toString() + '-';
-        firstLoad = false;
-        mustGet206 = this.logFileSize > 1;
-      }
-
-      this.console.debug(`${this.getLog.name}: using range ${range} for the request to tail ${this.url}`);
-      /* The "this.logFileSize - 1" deliberately reloads the last byte, which we already
-      * have. This is to prevent a 416 "Range unsatisfiable" error: a response
-      * of length 1 tells us that the file hasn't changed yet. A 416 shows that
-      * the file has been trucnated */
-
-      let response;
-      try {
-        response = await fetch(this.url, {
-          headers: {
-            Range: `bytes=${range}`,
-            'Cache-Control': 'no-cache',
-          },
-        });
-      }
-      catch (e) {
-        throw new FetchError(`Failed to fetch log ${this.url} due to a network error`, e);
-      }
-
-      this.console.debug(`${this.getLog.name}: got response from server ${this.debug && JSON.stringify(await this.dumpResponse(response.clone()))}`);
-      const xhr = response.clone();
+      const data = await this.getLog();
       this._loading = false;
-      let contentSize;
-  
-      if (xhr.status === 206) {
-        const c_r = xhr.headers.get('Content-Range');
-        if (!c_r) {
-          const actualHeaders = [];
-          for (const headerName of xhr.headers.keys()) {
-            actualHeaders.push({
-              name: headerName,
-              value: xhr.headers.get(headerName),
-            });
-          }
-          throw new MissingHeaderError('Missing content-range header', 'content-range', actualHeaders);
-        }
-  
-        this._logFileSize = this.parseInt2(c_r.split('/')[1]);
-        contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
-      } else if (xhr.status === 200) {
-        if (mustGet206) {
-          throw new Non206ResponseError('Got non-206 response from server', xhr.status, xhr.statusText);
-        }
-  
-        contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
-        this._logFileSize = contentSize;
-      } else if (xhr.status === 416) {
-        // the log file changed unexpectedly!
-        throw new LogFileTruncatedError(`The file ${this.url} seems to have been truncated from ${this._logFileSize} bytes to ${xhr.headers.get('content-range').split(/\//)[1]}`);
-      } else {
-        throw new UnexpectedServerResponseError(`Server responded with an unexpected code. Expected 200 or 206 but got ${xhr.status}`, xhr.status, xhr.statusText);
-      }
-  
-      this.console.debug(`Found new content size for ${this.url}: ${this.logFileSize}`);
-      const data = await xhr.text();
-      if (firstLoad && data.length > this.loadBytes) {
-        throw new ServerResponseTooLongError(`Server response is too long. Expected ${this.loadBytes} bytes but got ${data.length}`, data.length, data);
-      }
-
-      let newContent;
-      if (firstLoad) {
-        /* Clip leading part-line if not the whole file */
-        if (contentSize < this.logFileSize) {
-          const start = data.indexOf('\n');
-          newContent = this._logData = data.substring(start + 1);
-        } else {
-          newContent = this._logData = data;
-        }
-      } else {
-        /* Drop the first byte (see above) */
-        this._logData += (newContent = data.substring(1));
-      }
-  
-      this.emit(DataAppendedEvent.name, new DataAppendedEvent(newContent));
+      this.console.debug(`${this.poll.name}: got log content '${data}'`);
+      this.emit(DataAppendedEvent.name, new DataAppendedEvent(data));
     } catch (e) {
       this.emit(e.constructor.name, e);
       this.emit('error', e);
     } finally {
-      this._timeout = setTimeout(this.getLog.bind(this), this.pollInterval);
+      this._timeout = setTimeout(this.poll.bind(this), this.pollInterval);
     }
+  }
+
+  /**
+   * Helper method for determining the content of the Range header that'll be sent to the server. This method
+   * also sets up some required, internal flags
+   */
+  async getRange() {
+    let range;
+    if (!this.logFileSize) {
+      this.console.debug(`${this.getLog.name}: no file size yet, meaning it's the first request. Getting the current size of the log`);
+      this._logFileSize = await this.requestLogSize();
+      /* Get the last 'load' bytes */
+      range = '-' + (this.loadBytes > this.logFileSize ? this.logFileSize.toString() : this.loadBytes.toString());
+      this._firstLoad = true;
+      this._mustGet206 = false;
+    } else {
+      /* Get the (this.logFileSize - 1)th byte, onwards. */
+      /* The "this.logFileSize - 1" deliberately reloads the last byte, which we already
+       * have. This is to prevent a 416 "Range unsatisfiable" error: a response
+       * of length 1 tells us that the file hasn't changed yet. A 416 shows that
+       * the file has been trucnated */
+      range = (this.logFileSize - 1).toString() + '-';
+      this._firstLoad = false;
+      this._mustGet206 = this.logFileSize > 1;
+    }
+
+    return range;
+  }
+
+  /**
+   * Helper method for sending the range request to the server
+   * @param {string} range The range to request from the server. Defaults to the entire file
+   * @returns {Promise<string,FetchError|MissingHeaderError|Non206ResponseError|FileTruncatedError|UnexpectedServerResponseError>}
+   */
+  async sendRangeRequest(range='0-') {
+    let response;
+    try {
+      response = await fetch(this.url, {
+        headers: {
+          Range: `bytes=${range}`,
+          'Cache-Control': 'no-cache',
+        },
+      });
+    }
+    catch (e) {
+      throw new FetchError(`Failed to fetch log ${this.url} due to a network error`, e);
+    }
+
+    this.console.debug(`${this.sendRangeRequest.name}: got response from server ${this.debug && JSON.stringify(await this.dumpResponse(response.clone()))}`);
+    const xhr = response.clone();
+    let contentSize;
+
+    if (xhr.status === 206) {
+      const c_r = xhr.headers.get('Content-Range');
+      if (!c_r) {
+        const actualHeaders = [];
+        for (const headerName of xhr.headers.keys()) {
+          actualHeaders.push({
+            name: headerName,
+            value: xhr.headers.get(headerName),
+          });
+        }
+        throw new MissingHeaderError('Missing content-range header', 'content-range', actualHeaders);
+      }
+
+      this._logFileSize = this.parseInt2(c_r.split('/')[1]);
+      contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
+    } else if (xhr.status === 200) {
+      if (this._mustGet206) {
+        throw new Non206ResponseError('Got non-206 response from server', xhr.status, xhr.statusText);
+      }
+
+      contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
+      this._logFileSize = contentSize;
+    } else if (xhr.status === 416) {
+      // the log file changed unexpectedly!
+      throw new LogFileTruncatedError(`The file ${this.url} seems to have been truncated from ${this._logFileSize} bytes to ${xhr.headers.get('content-range').split(/\//)[1]}`);
+    } else {
+      throw new UnexpectedServerResponseError(`Server responded with an unexpected code. Expected 200 or 206 but got ${xhr.status}`, xhr.status, xhr.statusText);
+    }
+
+    return xhr.text();
+  }
+
+  /**
+   * Starts polling for the end of the file. New content is emitted after the initial 30kb are provided
+   * @returns {Promise<string[],Error>}
+   */
+  async getLog() {
+    const range = await this.getRange();
+    this.console.debug(`${this.getLog.name}: using range ${range} for the request to tail ${this.url}`);
+    const data = await this.sendRangeRequest(range);
+    this.console.debug(`Found new content for file ${this.url}: ${data} with new size ${this.logFileSize}`);
+    if (this._firstLoad && data.length > this.loadBytes) {
+      throw new ServerResponseTooLongError(`Server response is too long. Expected ${this.loadBytes} bytes but got ${data.length}`, data.length, data);
+    }
+
+    let newContent;
+    if (this._firstLoad) {
+      /* Clip leading part-line if not the whole file */
+      if (data.size < this.logFileSize) {
+        const start = data.indexOf('\n');
+        newContent = this._logData = data.substring(start + 1);
+      } else {
+        newContent = this._logData = data;
+      }
+    } else {
+      /* Drop the first byte (see above) */
+      this._logData += (newContent = data.substring(1));
+    }
+
+    return newContent;
   }
 
   /**
