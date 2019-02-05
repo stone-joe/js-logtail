@@ -1,9 +1,6 @@
-# Custom Element <tail-log>
-
-Very simple custom element for subscribing to changes in a file. This requires a server that properly consumes Content-Range headers (which should be most servers like lighthttp, nginx, etc).
-
-## Why a custom element and not a JS library?
-To me, the HTML is more readable and is clearer where and how it's used. Plus, the event system is built into components and working with events was easier than working with Promises.
+# LogTail
+Library for requesting the last N bytes of a log from any server that properly consumes the Range header and responds
+accordingly. This library includes polling and uses events to notify when data is available or when an error occurs.
 
 ## Installation
 `npm install --save logtail`
@@ -11,7 +8,13 @@ To me, the HTML is more readable and is clearer where and how it's used. Plus, t
 ## Usage
 ```javascript
   import LogTail from '/node_modules/logtail/logtail.js';
-  const tail = new LogTail('/url/to/file');
+  const tail = new LogTail({
+    url: '/url/to/file',
+    loadBytes: 30 * 1024, /* 30KB */
+    pollInterval: 1000, /* 1s */
+    pause: false,
+    debug: false,
+  });
   tail.on(UnexpectedServerResponseErrorEvent.name, evt => {
     console.log(evt.detail.status, evt.detail.statusText);
   });
@@ -37,12 +40,39 @@ To me, the HTML is more readable and is clearer where and how it's used. Plus, t
   tail.on('error', error => { ... });
 ```
 
-## Building and Testing
+### API
 ```
+const tail = new LogTail({
+  url: <string>,
+  loadBytes: <number>, /* Default: 30KB */
+  pollInterval: <number>, /* Default: 1s */
+  pause: false,
+  debug: false,
+});
+```
+The constructor takes an object of properties that configures the logger. The only required option is 'url' which points to the file to tail. The 'debug' option is mostly for development, but can be set to 'true' to see log output from this library
+
+#### on(event: string, callback: function, ctx: object) -> null
+Adds the `callback` as a listener to `event`. If `ctx` is a not-null or not-undefined object, the callback will be executed within that context; e.g. 
+```
+callback.apply(ctx)
+```
+The `callback` will recieve data about the event (usually just a single Event or Error object. See the method docs for more details)
+
+#### off(event: string, callback: function, ctx: object) -> boolean
+Removes the `callback` as a listener to `event`. It returns true if successful, false otherwise.
+
+#### f() -> null
+Starts the poller. The poller can also be started by calling `poll()`
+
+## Building and Testing
+```bash
 git clone https://github.com/stone-joe/logtail
 cd logtail
 npm install
 npm test
+npm start # starts the server for testing the script and viewing the logs
+npm run docs # generates the documentation (served when npm start is called)
 ```
 
 ## License
