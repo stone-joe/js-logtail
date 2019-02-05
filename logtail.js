@@ -17,7 +17,37 @@ export const defaultOpts = {
   logFileSize: 0,
 };
 
+/**
+ * An element that provides functionality for tailing logs from a properly enabled server. The server must consume and
+ * send Content-Range headers.
+ * 
+ * Attributes:
+ * - data-url - The URL endpoint to receive the GET request
+ * - data-load-bytes - The number of bytes to load (defaults to 30kb)
+ * - data-poll-interval - The polling frequency (defaults to 1000 milliseconds)
+ * - data-paused - If it exists, then the poller is stopped
+ * - data-loading - READONLY. True if a request is in progress
+ * - data-file-size - READONLY. The total size of the file in bytes
+ */
 export default class LogTail extends HTMLElement {
+  static get observedAttributes() {
+    return [
+      ATTR_PAUSED,
+    ];
+  }
+
+  attributeChangedCallback(name) {
+    switch(name) {
+      case ATTR_PAUSED:
+        if (this.paused && this._timeout) {
+          clearTimeout(this._timeout);
+        } else {
+          this.getLog();
+        }
+        break;
+    }
+  }
+
   /* :-( https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt */
   parseInt2(value) {
     if (!(/^[0-9]+$/.test(value))) throw new TypeError('Invalid integer ' + value);
@@ -55,7 +85,7 @@ export default class LogTail extends HTMLElement {
     try {
       const response = await fetch(this.url, {
         headers: {
-          Range: "bytes=" + range,
+          Range: `bytes=${range}`,
           'Cache-Control': 'no-cache',
         },
       });
@@ -110,13 +140,13 @@ export default class LogTail extends HTMLElement {
         this.logData += data.substring(1);
   
         if (this.logData.length > this.load) {
-          const start = this.logData.indexOf("\n", this.logData.length - this.load);
+          const start = this.logData.indexOf('\n', this.logData.length - this.load);
           this.logData = this.logData.substring(start + 1);
         }
       }
   
       this.dispatchEvent(DataAppendedEvent.name, new DataAppendedEvent(data));
-      setTimeout(this.getLog, this.pollInterval);
+      this._timeout = setTimeout(this.getLog, this.pollInterval);
     } catch (e) {
       this.pause = true;
       this.dispatchEvent(FetchErrorEvent.name, new FetchErrorEvent('Fetching the log file failed. This may be due to a network error. Please try again in a few minutes', e));
