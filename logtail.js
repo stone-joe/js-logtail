@@ -57,7 +57,7 @@ export default class LogTail {
 
   /**
    * @param {string} event
-   * @returns {{callback: function, ctx: object}[]}
+   * @returns {object[]}
    */
   listeners(event) {
     return (this._listeners[event] || (this._listeners[event] = []));
@@ -525,7 +525,7 @@ export class MissingHeaderError extends Error {
   }
 
   /**
-   * @returns {{name: string, value: string}[]} The headers returned in the response
+   * @returns {object[]} The headers returned in the response
    */
   get responseHeaders() {
     return this._responseHeaders;

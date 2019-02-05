@@ -1,7 +1,7 @@
 {
-  "name": "logtail",
+  "name": "js-logtail",
   "description": "A component for tailing a log file from a server that consumes the Range header",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "author": {
     "name": "Joseph Stone",
     "email": "stone.ejoseph@protonmail.com"
@@ -9,12 +9,15 @@
   "scripts": {
     "lint": "./node_modules/.bin/eslint logtail.js",
     "test:unit": "./node_modules/.bin/mocha -r esm -r tests/globals.js tests/*.spec.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "doc": "./node_modules/.bin/esdoc logtail.js"
   },
   "license": "MIT",
   "devDependencies": {
     "chai": "^4.2.0",
     "chai-as-promised": "^7.1.1",
+    "esdoc": "^1.1.0",
+    "esdoc-standard-plugin": "^1.0.0",
     "eslint": "^5.13.0",
     "esm": "^3.2.1",
     "express": "^4.16.4",
@@ -28,5 +31,15 @@
     "node-fetch": "^2.3.0",
     "range-parser": "^1.2.0",
     "sinon": "^7.2.3"
+  },
+  "esdoc": {
+    "source": ".",
+    "destination": "./docs",
+    "plugins": [
+      {
+        "name": "esdoc-standard-plugin"
+      }
+    ],
+    "excludes": ["tests/globals.js", "tests/logtail.mjs", "tests/logtail.spec.js", "server.js", "node_modules/"]
   }
 }
