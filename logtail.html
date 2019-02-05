@@ -5,17 +5,21 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>LogTail</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script src="/logtail.js" type="module"></script>
 </head>
 <body>
   <tail-log data-url="/logs/test.log"></tail-log>
   <div id="text"></div>
   <script type="module">
-    import { DataAppendedEvent } from '/logtail.js';
-    document.querySelector('tail-log').addEventListener(DataAppendedEvent.name, evt => {
+    import LogTail, { DataAppendedEvent } from '/logtail.js';
+    const tail = new LogTail({
+      url: '/logs/test.log',
+    });
+    tail.on(DataAppendedEvent.name, evt => {
       document.querySelector('#text').innerHTML += evt.detail;
     });
-    document.querySelector('tail-log').getLog();
+    tail.on('error', console.error);
+    tail.debug = true;
+    tail.f();
   </script>
 </body>
 </html>

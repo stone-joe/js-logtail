@@ -1,61 +1,85 @@
 /* Copyright (c) 2012: Daniel Richman. License: GNU GPL 3 */
 /* Additional features: Priyesh Patel                     */
 /* ES6 update: Joseph Stone                               */
-export const ATTR_URL = 'data-url';
-export const ATTR_LOAD = 'data-load-bytes';
-export const ATTR_POLL = 'data-poll-interval';
-export const ATTR_PAUSED = 'data-paused';
-export const ATTR_LOADING = 'data-loading';
-export const ATTR_LOG_FILE_SIZE = 'data-file-size';
 export const defaultOpts = {
-  url: '/weblog',
-  load: 30 * 1024, /* 30KB */
-  poll: 1000, /* 1s */
-  loading: false,
+  url: '/logs',
+  loadBytes: 30 * 1024, /* 30KB */
+  pollInterval: 1000, /* 1s */
   pause: false,
-  logData: '',
-  logFileSize: 0,
+  debug: true,
 };
 
 /**
- * An element that provides functionality for tailing logs from a properly enabled server. The server must consume and
- * send Content-Range headers.
- * 
- * Attributes:
- * - data-url - The URL endpoint to receive the GET request
- * - data-load-bytes - The number of bytes to load (defaults to 30kb)
- * - data-poll-interval - The polling frequency (defaults to 1000 milliseconds)
- * - data-paused - If it exists, then the poller is stopped
- * - data-loading - READONLY. True if a request is in progress
- * - data-file-size - READONLY. The total size of the file in bytes
+ * A class for tailing logs from a server. This requires that the server properly consumes the Range header (most should)
  */
-export default class LogTail extends HTMLElement {
-  static get observedAttributes() {
-    return [
-      ATTR_PAUSED,
-    ];
+export default class LogTail {
+  /**
+   * 
+   * @param {object} opts
+   * @param {string} opts.url
+   * @param {number} opts.loadBytes The number of bytes to load from the end of the file. Defaults to 30kb
+   * @param {number} opts.pollInterval The time to wait between polls. Defaults to 1 second
+   * @param {boolean} opts.pause Set to true to stop the poll, false to begin
+   * @param {boolean} opts.debug Whether or not to log to the console. Defaults to true
+   */
+  constructor(opts = {}) {
+    Object.assign(this, defaultOpts, opts);
+    this._listeners = {};
+    this.f = this.getLog.bind(this);
   }
 
-  attributeChangedCallback(name, oldValue) {
-    switch(name) {
-      case ATTR_PAUSED:
-        if (this.paused && this._timeout) {
-          clearTimeout(this._timeout);
-        } else {
-          this.getLog();
-        }
-        break;
-      case ATTR_LOADING:
-        // do not allow this value to change - it's READONLY
-        this._loading = oldValue;
-        console.warn(`Attempted to change READONLY attribute ${ATTR_LOADING}`);
-        break;
-      case ATTR_LOG_FILE_SIZE:
-        // do not allow this value to change - it's READONLY
-        this._logFileSize = oldValue;
-        console.warn(`Attempted to change READONLY attribute ${ATTR_LOG_FILE_SIZE}`);
-        break;
+  /**
+   * Add a listener to the specified event
+   * @param {string} event
+   * @param {function} callback
+   * @param {object} ctx
+   */
+  on(event, callback, ctx) {
+    this.console.debug(`EventEmitter: Adding listener ${callback} to event ${event} with context ${ctx}`);
+    this.listeners(event).push({callback, ctx});
+  }
+
+  /**
+   * Removes the listener from the event
+   * @param {string} event
+   * @param {function} callback
+   */
+  off(event, callback) {
+    const listenerIndex = this.listeners(event).findIndex(listener => listener.callback !== callback);
+    if (listenerIndex > -1) {
+      this._listeners[event].splice(listenerIndex, 1);
+      this.console.debug(`EventEmitter: Removing listener ${callback} from event ${event}`);
+      return true;
+    } else {
+      this.console.warn(`EventEmitter: failed to find listener ${callback} for event ${event}. Nothing has been removed`);
+      return false;
     }
+  }
+
+  /**
+   * @param {string} event
+   * @returns {{callback: function, ctx: object}[]}
+   */
+  listeners(event) {
+    return (this._listeners[event] || (this._listeners[event] = []));
+  }
+
+  /**
+   * Calls all listeners subscribed to this event
+   * @param {string} event
+   * @param {mixed[]} args Arguments to send to the listener
+   */
+  emit(event, args=[]) {
+    this.console.debug(`EventEmitter: emitting event ${event} with arguments ${args}`);
+    this.listeners(event).forEach(listener => {
+      this.console.debug(`EventEmitter: emit ${event} to ${listener}`);
+      args = Array.isArray(args) ? args : [args];
+      if (listener.ctx) {
+        listener.callback.apply(listener.ctx, args);
+      } else {
+        listener.callback(...args);
+      }
+    });
   }
 
   /* :-( https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/parseInt */
@@ -71,57 +95,77 @@ export default class LogTail extends HTMLElement {
    * @returns {Promise<number, Error>}
    */
   async requestLogSize() {
+    this.console.info(`${this.requestLogSize.name}: sending HEAD request to ${this.url}`);
     try {
       const response = await fetch(this.url, {
         method: 'HEAD'
       });
+      this.console.debug(`${this.requestLogSize.name}: got response ${this.debug && JSON.stringify(await this.dumpResponse(response.clone()))}`);
       if (response.ok) {
         if (!response.headers.has('Content-Length')) {
-          throw new MissingContentLengthHeaderError('Server did not respond with a Content-Length header');
+          const actualHeaders = {};
+          response.headers.forEach((value, name) => actualHeaders[name] = value);
+          throw new MissingContentLengthHeaderError('Server did not respond with a Content-Length header', 'content-length', actualHeaders);
         } else {
           return response.headers.get('Content-Length') * 1;
         }
       } else {
-        throw new RangeError(`Server responded with non-ok status code: ${response.status} :: ${response.statusText}`);
+        throw new UnexpectedServerResponseError(`Server responded with non-ok status code: ${response.status} :: ${response.statusText}`, response.status, response.statusText);
       }
     } catch (e) {
-      throw new HeadRequestError(e);
+      throw new HeadRequestError(`Failed to fetch size of ${this.url} due to unknown network error`, e);
     }
   }
 
+  /**
+   * Starts polling for the end of the file. New content is emitted after the initial 30kb are provided
+   */
   async getLog() {
-    if (this.pause || this.loading){
-      return;
-    }
-    this._loading = true;
-
-    let range;
-    let firstLoad;
-    let mustGet206;
-    if (!this.logFileSize) {
-      /* Get the last 'load' bytes */
-      range = '-' + this.loadBytes.toString();
-      firstLoad = true;
-      mustGet206 = false;
-    } else {
-      /* Get the (this.logFileSize - 1)th byte, onwards. */
-      range = (this.logFileSize - 1).toString() + '-';
-      firstLoad = false;
-      mustGet206 = this.logFileSize > 1;
-    }
-
-    /* The "this.logFileSize - 1" deliberately reloads the last byte, which we already
-     * have. This is to prevent a 416 "Range unsatisfiable" error: a response
-     * of length 1 tells us that the file hasn't changed yet. A 416 shows that
-     * the file has been trucnated */
-
     try {
-      const response = await fetch(this.url, {
-        headers: {
-          Range: `bytes=${range}`,
-          'Cache-Control': 'no-cache',
-        },
-      });
+      if (this.pause || this.loading) {
+        this.console.info(`${this.getLog.name}: poller is paused (this.pause: ${this.pause}, this.loading: ${this.loading}). Not tailing log ${this.url}`);
+        return;
+      }
+      this.console.info(`${this.getLog.name}: tailing log ${this.url}`);
+      this._loading = true;
+
+      let range;
+      let firstLoad;
+      let mustGet206;
+      if (!this.logFileSize) {
+        this.console.debug(`${this.getLog.name}: no file size yet, meaning it's the first request. Getting the current size of the log`);
+        this._logFileSize = await this.requestLogSize();
+        /* Get the last 'load' bytes */
+        range = '-' + (this.loadBytes > this.logFileSize ? this.logFileSize.toString() : this.loadBytes.toString());
+        firstLoad = true;
+        mustGet206 = false;
+      } else {
+        /* Get the (this.logFileSize - 1)th byte, onwards. */
+        range = (this.logFileSize - 1).toString() + '-';
+        firstLoad = false;
+        mustGet206 = this.logFileSize > 1;
+      }
+
+      this.console.debug(`${this.getLog.name}: using range ${range} for the request to tail ${this.url}`);
+      /* The "this.logFileSize - 1" deliberately reloads the last byte, which we already
+      * have. This is to prevent a 416 "Range unsatisfiable" error: a response
+      * of length 1 tells us that the file hasn't changed yet. A 416 shows that
+      * the file has been trucnated */
+
+      let response;
+      try {
+        response = await fetch(this.url, {
+          headers: {
+            Range: `bytes=${range}`,
+            'Cache-Control': 'no-cache',
+          },
+        });
+      }
+      catch (e) {
+        throw new FetchError(`Failed to fetch log ${this.url} due to a network error`, e);
+      }
+
+      this.console.debug(`${this.getLog.name}: got response from server ${this.debug && JSON.stringify(await this.dumpResponse(response.clone()))}`);
       const xhr = response.clone();
       this._loading = false;
       let contentSize;
@@ -136,92 +180,97 @@ export default class LogTail extends HTMLElement {
               value: xhr.headers.get(headerName),
             });
           }
-          this.dispatchEvent(new MissingContentRangeHeaderErrorEvent(actualHeaders));
-          return;
+          throw new MissingHeaderError('Missing content-range header', 'content-range', actualHeaders);
         }
   
-        this.setAttribute(ATTR_LOG_FILE_SIZE, this.parseInt2(c_r.split('/')[1]));
+        this._logFileSize = this.parseInt2(c_r.split('/')[1]);
         contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
       } else if (xhr.status === 200) {
         if (mustGet206) {
-          this.dispatchEvent(new Non206ResponseErrorEvent(xhr.status, xhr.statusText));
-          return;
+          throw new Non206ResponseError('Got non-206 response from server', xhr.status, xhr.statusText);
         }
   
         contentSize = this.parseInt2(xhr.headers.get('Content-Length'));
-        this.setAttribute(ATTR_LOG_FILE_SIZE, contentSize);
+        this._logFileSize = contentSize;
+      } else if (xhr.status === 416) {
+        // the log file changed unexpectedly!
+        throw new LogFileTruncatedError(`The file ${this.url} seems to have been truncated from ${this._logFileSize} bytes to ${xhr.headers.get('content-range').split(/\//)[1]}`);
       } else {
-        this.dispatchEvent(new UnexpectedServerResponseErrorEvent(xhr.status, xhr.statusText));
-        return;
+        throw new UnexpectedServerResponseError(`Server responded with an unexpected code. Expected 200 or 206 but got ${xhr.status}`, xhr.status, xhr.statusText);
       }
   
+      this.console.debug(`Found new content size for ${this.url}: ${this.logFileSize}`);
       const data = await xhr.text();
       if (firstLoad && data.length > this.loadBytes) {
-        this.dispatchEvent(new ServerResponseTooLongErrorEvent(data.length, data));
-        return;
+        throw new ServerResponseTooLongError(`Server response is too long. Expected ${this.loadBytes} bytes but got ${data.length}`, data.length, data);
       }
-  
+
+      let newContent;
       if (firstLoad) {
         /* Clip leading part-line if not the whole file */
         if (contentSize < this.logFileSize) {
           const start = data.indexOf('\n');
-          this.logData = data.substring(start + 1);
+          newContent = this._logData = data.substring(start + 1);
         } else {
-          this.logData = data;
+          newContent = this._logData = data;
         }
       } else {
         /* Drop the first byte (see above) */
-        this.logData += data.substring(1);
-  
-        if (this.logData.length > this.loadBytes) {
-          const start = this.logData.indexOf('\n', this.logData.length - this.loadBytes);
-          this.logData = this.logData.substring(start + 1);
-        }
+        this._logData += (newContent = data.substring(1));
       }
   
-      this.dispatchEvent(new DataAppendedEvent(data));
-      this._timeout = setTimeout(this.getLog.bind(this), this.pollInterval);
+      this.emit(DataAppendedEvent.name, new DataAppendedEvent(newContent));
     } catch (e) {
-      this.pause = true;
-      this.dispatchEvent(new FetchErrorEvent('Fetching the log file failed. This may be due to a network error. Please try again in a few minutes', e));
+      this.emit(e.constructor.name, e);
+      this.emit('error', e);
+    } finally {
+      this._timeout = setTimeout(this.getLog.bind(this), this.pollInterval);
     }
   }
 
   /**
-   * @returns {boolean} READONLY. If true, the element is currently loading the next set of bytes
+   * Creates a JSON object of the provided response. This is mostly for debugging purposes
+   * @param {Response} response
+   * @returns {Promise<object, Error>}
+   */
+  async dumpResponse(response) {
+    const json = {
+      status: response.status,
+      statusText: response.statusText,
+      headers: {},
+      redirected: response.redirected,
+    };
+    const clone = response.clone();
+    clone.headers.forEach((value, header) => json.headers[header] = value);
+    if (clone.headers.has('content-type')) {
+      if (clone.headers.get('content-type').search('json') > -1) {
+        json.body = await clone.json();
+      } else {
+        json.text = await clone.text();
+      }
+    }
+    return json;
+  }
+
+  /**
+   * @returns {boolean} If true, the log data is currently being fetched
    */
   get loading() {
-    return this.hasAttribute(ATTR_LOADING);
-  }
-
-  /**
-   * @private
-   * @returns {boolean} Internal flag for checking the loading state of the component. The value is reflected to the attribute
-   */
-  get _loading() {
-    return this.loading;
-  }
-
-  set _loading(_loading=false) {
-    if (_loading) {
-      this.setAttribute(ATTR_LOADING, _loading);
-    } else {
-      this.removeAttribute(ATTR_LOADING);
-    }
+    return this._loading;
   }
 
   /**
    * @returns {number} The number of milliseconds to wait between each poll
    */
   get pollInterval() {
-    return this.hasAttribute(ATTR_POLL) ? this.getAttribute(ATTR_POLL) * 1 : 1000;
+    return this._pollInterval || defaultOpts.pollInterval;
   }
 
   set pollInterval(pollInterval=1000) {
     if (Number.isInteger(pollInterval) && !Number.isNaN(pollInterval) && pollInterval > 0) {
-      this.setAttribute(ATTR_POLL, pollInterval);
+      this._pollInterval = pollInterval;
     } else {
-      throw new TypeError(`Attribute '${ATTR_POLL}' must be a positive integer, not ${pollInterval}`);
+      throw new TypeError(`Attribute 'pollInterval' must be a positive integer, not ${pollInterval}`);
     }
   }
 
@@ -229,14 +278,14 @@ export default class LogTail extends HTMLElement {
    * @returns {number} The number of bytes to load on each request. Defaults to 30kb
    */
   get loadBytes() {
-    return this.getAttribute(ATTR_LOAD) || defaultOpts.load;
+    return this._loadBytes || defaultOpts.loadBytes;
   }
 
   set loadBytes(loadBytes=30 * 1024) {
     if (Number.isInteger(loadBytes) && !Number.isNaN(loadBytes) && loadBytes > 0) {
-      this.setAttribute(ATTR_LOAD, loadBytes);
+      this._loadBytes = loadBytes;
     } else {
-      throw new TypeError(`Attribute '${ATTR_LOAD}' must be a positive integer, not ${loadBytes}`);
+      throw new TypeError(`Property 'loadBytes' must be a positive integer, not ${loadBytes}`);
     }
   }
 
@@ -244,29 +293,25 @@ export default class LogTail extends HTMLElement {
    * @returns {boolean} True if the poller is paused. Default is false
    */
   get paused() {
-    return this.hasAttribute(ATTR_PAUSED);
+    return this._paused;
   }
 
   set paused(paused=false) {
-    if (paused) {
-      this.setAttribute(ATTR_PAUSED, '');
-    } else {
-      this.removeAttribute(ATTR_PAUSED);
-    }
+    this._paused = !!paused;
   }
 
   /**
    * @returns {string} The URL from which the log file is retrieved
    */
   get url() {
-    return this.getAttribute(ATTR_URL);
+    return this._url;
   }
 
-  set url(url='/weblog') {
+  set url(url='/logs') {
     if (typeof url === 'string') {
-      this.setAttribute(ATTR_URL, url);
+      this._url = url;
     } else {
-      throw new TypeError(`Attribute '${ATTR_URL}' must be a string, not ${url}`);
+      throw new TypeError(`Property 'url' must be a string, not ${url}`);
     }
   }
 
@@ -275,50 +320,75 @@ export default class LogTail extends HTMLElement {
    * retrieved or the file size is unknown
    */
   get logFileSize() {
-    return this.hasAttribute(ATTR_LOG_FILE_SIZE) ? this.getAttribute(ATTR_LOG_FILE_SIZE) * 1 : null;
+    return this._logFileSize || null;
   }
 
   /**
-   * @private
-   * @returns {number} The size of the file in bytes. This property is used to enforce the readonly nature of this value.
+   * @returns {string} The information from the logs that's been pulled so far
    */
-  get _logFileSize() {
-    return this.logFileSize;
+  get logData() {
+    return this._logData;
   }
 
-  set _logFileSize(_logFileSize) {
-    if (Number.isInteger(_logFileSize) && !Number.isNaN(_logFileSize) && Number.isFinite(_logFileSize) && _logFileSize > 0) {
-      this.setAttribute(ATTR_LOG_FILE_SIZE, _logFileSize);
-    } else {
-      throw new TypeError(`Attribute ${ATTR_LOG_FILE_SIZE} must be a positive, finite, integer, not ${_logFileSize}`);
-    }
+  /**
+   * Wraps the default console methods with a check for the debug flag
+   */
+  get console() {
+    const c = {};
+    const self = this;
+    ['info', 'debug', 'error', 'warn', 'log'].forEach(level => {
+      c[level] = function() {
+        if (self.debug) {
+          console[level](...arguments);
+        }
+      };
+    });
+    return c;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  get debug() {
+    return this._debug;
+  }
+
+  set debug(debug) {
+    this._debug = !!debug;
   }
 }
 
 /**
- * An event that's emitted when the fetch of the log file fails due to an unknown network error. The
- * 'detail' is the error object that was thrown
+ * Helper method for displaying the stack trace of an error that was caused by another error. The error that caused this error
+ * is accessible via the 'causedBy' property in the detail
  */
-export class FetchErrorEvent extends CustomEvent {
-  static get name() {
-    return 'fetch-error';
+export class CausedBy extends Error {
+  constructor(msg, e) {
+    super(msg);
+    this.error = e;
   }
 
-  constructor(e) {
-    super(FetchErrorEvent.name, {
-      bubbles: true,
-      composed: true,
-      detail: e,
-    });
+  get stack() {
+    return `${super.stack}${this.error instanceof Error ? `\n\t Caused by ... ${this.error.stack}` : ''}`;
   }
 }
+
+/**
+ * An error that's emitted when the length of the file can't be retrieved. This will force the polling to pause
+ */
+export class FetchContentLengthError extends CausedBy {}
+
+/**
+ * An error that's emitted when the fetch of the log file fails due to an unknown network error
+ */
+export class FetchError extends CausedBy {}
 
 /**
  * An event that's emitted when data has been appended to the log file. The added
  * string are the 'detail' property.
  * @example
  * <code>
- *  logtail.addEventListener(DataAppendedEvent.name, evt => {
+ *  logtail.on(DataAppendedEvent.name, evt => {
  *    console.log(`Data appended to file: ${evt.detail}`);
  *  });
  * </code>
@@ -330,119 +400,117 @@ export class DataAppendedEvent extends CustomEvent {
 
   constructor(bytes=[]) {
     super(DataAppendedEvent.name, {
-      bubbles: true,
-      composed: true,
       detail: bytes,
     });
   }
 }
 
 /**
- * An event that's thrown when the server responds with too many bytes. The detail property has two properties:
- * - length (number) - the number of bytes in the respones
- * - responseText (string) - the (likely partial or truncated) response from the server
+ * An event that's thrown when the server responds with too many bytes
  */
-export class ServerResponseTooLongErrorEvent extends CustomEvent {
-  static get name() {
-    return 'server-response-too-long';
+export class ServerResponseTooLongError extends Error {
+  constructor(msg, length, responseText) {
+    super(msg);
+    this._length = length;
+    this._responseText = responseText;
   }
 
-  constructor(length, responseText) {
-    super(ServerResponseTooLongErrorEvent.name, {
-      bubbles: true,
-      composed: true,
-      detail: {
-        length,
-        responseText,
-      },
-    });
+  /**
+   * @returns {number} the number of bytes in the respones
+   */
+  get length() {
+    return this._length;
+  }
+
+  /**
+   * @returns {string} the (likely partial or truncated) response from the server
+   */
+  get responseText() {
+    return this._responseText;
   }
 }
 
 /**
- * An event that's dispatched when the server responds with a status that's not 200 or 206. The status and statusText
- * are provided in the detail as 'status' and 'statusText'
+ * An event that's dispatched when the server responds with a status that's not 200 or 206
  */
-export class UnexpectedServerResponseErrorEvent extends CustomEvent {
-  static get name() {
-    return 'unexpected-response';
+export class UnexpectedServerResponseError extends Error {
+  constructor(msg, status, statusText) {
+    super(msg);
+    this._status = status;
+    this._statusText = statusText;
   }
 
-  constructor(status, statusText) {
-    super(UnexpectedServerResponseErrorEvent.name, {
-      bubbles: true,
-      composed: true,
-      detail: {
-        status,
-        statusText,
-      },
-    });
+  /**
+   * @returns {number} The status code that was returned
+   */
+  get status() {
+    return this._status;
+  }
+  
+  /**
+   * @returns {string}
+   */
+  get statusText() {
+    return this._statusText;
   }
 }
 
 /**
- * An event that's emitted when the server returns a non-206 code when 206 (partial content) is expected. The
- * actual status and statusText are provided in the detail property as 'status' and 'statusText'.
+ * An error that's thrown when a 416 response is recieved. This usually means that
+ * the log file has changed in such a way that the requested range is no longer valid (e.g. the
+ * file got truncated)
  */
-export class Non206ResponseErrorEvent extends CustomEvent {
-  static get name() {
-    return 'response-non-206';
-  }
+export class LogFileTruncatedError extends Error {}
 
-  constructor(status, statusText) {
-    super(Non206ResponseErrorEvent.name, {
-      bubbles: true,
-      composed: true,
-      detail: {
-        status,
-        statusText,
-      },
-    });
-  }
-}
+/**
+ * An event that's emitted when the server returns a non-206 code when 206 (partial content) is expected
+ */
+export class Non206ResponseError extends UnexpectedServerResponseError {}
 
 /**
  * An event that's dispatched when the server doesn't respond with a Content-Range header. The headers that were
- * sent are provided in an array as the detail property.
+ * sent are provided in an array in the detail property as well as the name of the missing header
  * @example
  * <code>
- *   document.querySelector('tail-log').addEventListener(MissingContentRangeHeaderErrorEvent.name, evt => {
- *     evt.detail.forEach(header => {
+ *   logtail.on(MissingContentRangeHeaderErrorEvent.name, evt => {
+ *     evt.detail.headers.forEach(header => {
  *        console.log(`Got header ${header.name}: ${header.value}`);
  *     }); 
  *   });
  * </code>
  */
-export class MissingContentRangeHeaderErrorEvent extends CustomEvent {
+export class MissingHeaderError extends Error {
   static get name() {
-    return 'missing-range-header';
+    return 'missing-header';
   }
 
-  constructor(headers) {
-    super(MissingContentRangeHeaderErrorEvent.name, {
-      bubbles: true,
-      composed: true,
-      detail: headers,
-    });
+  constructor(msg, missingHeader, responseHeaders) {
+    super(msg);
+    this._missingHeader = missingHeader;
+    this._responseHeaders = responseHeaders;
+  }
+
+  /**
+   * @returns {string} The name of the missing header
+   */
+  get missingHeader() {
+    return this._missingHeader;
+  }
+
+  /**
+   * @returns {{name: string, value: string}[]} The headers returned in the response
+   */
+  get responseHeaders() {
+    return this._responseHeaders;
   }
 }
 
 /**
  * An error that's thrown if the server doesn't respond to the HEAD request with a Content-Length
  */
-export class MissingContentLengthHeaderError extends Error {}
+export class MissingContentLengthHeaderError extends MissingHeaderError {}
+
 /**
  * An error that's thrown if the HEAD request fails due to network or other non-application errors
  */
-export class HeadRequestError extends Error {
-  constructor(e) {
-    super(e.message);
-    this.error = e;
-  }
-
-  get stack() {
-    return `${super.stack}${this.error ? `\n\t Caused by ... ${this.error.stack}` : ''}`;
-  }
-}
-
-window.customElements.define('tail-log', LogTail);
+export class HeadRequestError extends CausedBy {}
