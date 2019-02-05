@@ -6,7 +6,7 @@ export const defaultOpts = {
   loadBytes: 30 * 1024, /* 30KB */
   pollInterval: 1000, /* 1s */
   pause: false,
-  debug: true,
+  debug: false,
 };
 
 /**
@@ -20,7 +20,7 @@ export default class LogTail {
    * @param {number} opts.loadBytes The number of bytes to load from the end of the file. Defaults to 30kb
    * @param {number} opts.pollInterval The time to wait between polls. Defaults to 1 second
    * @param {boolean} opts.pause Set to true to stop the poll, false to begin
-   * @param {boolean} opts.debug Whether or not to log to the console. Defaults to true
+   * @param {boolean} opts.debug Whether or not to log to the console. Defaults to false
    */
   constructor(opts = {}) {
     Object.assign(this, defaultOpts, opts);
@@ -125,7 +125,7 @@ export default class LogTail {
    */
   async poll() {
     try {
-      if (this.pause || this.loading) {
+      if (this.paused || this.loading) {
         this.console.info(`${this.poll.name}: poller is paused (this.pause: ${this.pause}, this.loading: ${this.loading}). Not tailing log ${this.url}`);
         return;
       }
@@ -138,9 +138,9 @@ export default class LogTail {
     } catch (e) {
       this.emit(e.constructor.name, e);
       this.emit('error', e);
-    } finally {
-      this._timeout = setTimeout(this.poll.bind(this), this.pollInterval);
     }
+
+    this._timeout = setTimeout(this.poll.bind(this), this.pollInterval);
   }
 
   /**

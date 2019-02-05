@@ -1,7 +1,7 @@
 {
   "name": "logtail",
   "description": "A component for tailing a log file from a server that consumes the Range header",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "author": {
     "name": "Joseph Stone",
     "email": "stone.ejoseph@protonmail.com"
@@ -14,6 +14,7 @@
   "license": "MIT",
   "devDependencies": {
     "chai": "^4.2.0",
+    "chai-as-promised": "^7.1.1",
     "eslint": "^5.13.0",
     "esm": "^3.2.1",
     "express": "^4.16.4",
