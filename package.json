@@ -1,7 +1,7 @@
 {
   "name": "js-logtail",
   "description": "A component for tailing a log file from a server that consumes the Range header",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "author": {
     "name": "Joseph Stone",
     "email": "stone.ejoseph@protonmail.com"

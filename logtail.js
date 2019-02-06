@@ -94,25 +94,29 @@ export default class LogTail {
    * @returns {Promise<number, Error>}
    */
   async requestLogSize() {
+    let response;
     this.console.info(`${this.requestLogSize.name}: sending HEAD request to ${this.url}`);
     try {
-      const response = await fetch(this.url, {
+      response = await fetch(this.url, {
         method: 'HEAD'
       });
       this.console.debug(`${this.requestLogSize.name}: got response ${this.debug && JSON.stringify(await this.dumpResponse(response.clone()))}`);
-      if (response.ok) {
-        if (!response.headers.has('Content-Length')) {
-          const actualHeaders = {};
-          response.headers.forEach((value, name) => actualHeaders[name] = value);
-          throw new MissingContentLengthHeaderError('Server did not respond with a Content-Length header', 'content-length', actualHeaders);
-        } else {
-          return response.headers.get('Content-Length') * 1;
-        }
-      } else {
-        throw new UnexpectedServerResponseError(`Server responded with non-ok status code: ${response.status} :: ${response.statusText}`, response.status, response.statusText);
-      }
     } catch (e) {
       throw new HeadRequestError(`Failed to fetch size of ${this.url} due to unknown network error`, e);
+    }
+
+    if (response.ok) {
+      if (!response.headers.has('Content-Length')) {
+        const actualHeaders = {};
+        response.headers.forEach((value, name) => actualHeaders[name] = value);
+        throw new MissingContentLengthHeaderError('Server did not respond with a Content-Length header', 'content-length', actualHeaders);
+      } else {
+        return response.headers.get('Content-Length') * 1;
+      }
+    } else if (response.status === 404) {
+      throw new ResourceNotFoundError(this.url);
+    } else {
+      throw new UnexpectedServerResponseError(`Server responded with non-ok status code: ${response.status} :: ${response.statusText}`, response.status, response.statusText);
     }
   }
 
@@ -134,7 +138,11 @@ export default class LogTail {
       const data = await this.getLog();
       this._loading = false;
       this.console.debug(`${this.poll.name}: got log content '${data}'`);
-      this.emit(DataAppendedEvent.name, new DataAppendedEvent(data));
+      if (data.length > 0) {
+        this.emit(DataAppendedEvent.name, new DataAppendedEvent(data));
+      } else {
+        this.console.debug(`${this.poll.name}: not emitting event since no new data was retrieved from the server`);
+      }
     } catch (e) {
       this.emit(e.constructor.name, e);
       this.emit('error', e);
@@ -184,8 +192,7 @@ export default class LogTail {
           'Cache-Control': 'no-cache',
         },
       });
-    }
-    catch (e) {
+    } catch (e) {
       throw new FetchError(`Failed to fetch log ${this.url} due to a network error`, e);
     }
 
@@ -218,6 +225,8 @@ export default class LogTail {
     } else if (xhr.status === 416) {
       // the log file changed unexpectedly!
       throw new LogFileTruncatedError(`The file ${this.url} seems to have been truncated from ${this._logFileSize} bytes to ${xhr.headers.get('content-range').split(/\//)[1]}`);
+    } else if (xhr.status === 404) {
+      throw new ResourceNotFoundError(this.url);
     } else {
       throw new UnexpectedServerResponseError(`Server responded with an unexpected code. Expected 200 or 206 but got ${xhr.status}`, xhr.status, xhr.statusText);
     }
@@ -541,3 +550,20 @@ export class MissingContentLengthHeaderError extends MissingHeaderError {}
  * An error that's thrown if the HEAD request fails due to network or other non-application errors
  */
 export class HeadRequestError extends CausedBy {}
+
+/**
+ * An error that's thrown when the provided URL results in a 404 server response
+ */
+export class ResourceNotFoundError extends Error {
+  constructor(uri) {
+    super('Resource not found');
+    this._uri = uri;
+  }
+
+  /**
+   * @returns {string} The URI that failed to return a resource
+   */
+  get uri() {
+    return this._uri;
+  }
+}

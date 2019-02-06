@@ -1,4 +1,4 @@
-import LogTail, { MissingHeaderError, LogFileTruncatedError, UnexpectedServerResponseError, FetchError, DataAppendedEvent } from './logtail.mjs';
+import LogTail, { MissingHeaderError, LogFileTruncatedError, UnexpectedServerResponseError, FetchError, DataAppendedEvent, MissingContentLengthHeaderError, ResourceNotFoundError, HeadRequestError } from './logtail.mjs';
 const chai = require('chai');
 const expect = chai.expect;
 const sinon = require('sinon');
@@ -231,6 +231,26 @@ describe('LogTail', function() {
         }
       });
     });
+    it('should not emit an event if the retrieved data is an empty string', async function() {
+      return new Promise(async (resolve, reject) => {
+        // setup
+        const stub = sandbox.stub();
+        sandbox.stub(tail, 'getLog').returns(Promise.resolve(''));
+        tail.on(DataAppendedEvent.name, stub);
+        tail.on('error', error => reject(error));
+        // test
+        await tail.poll();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        // verify
+        try {
+          clearTimeout(tail._timeout);
+          sinon.assert.notCalled(stub);
+          resolve();
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
     it('should emit an error when one is thrown', async function() {
       return new Promise(async (resolve, reject) => {
         // setup
@@ -294,6 +314,85 @@ describe('LogTail', function() {
       await tail.poll();
       // verify
       sinon.assert.notCalled(stub);
+    });
+  });
+  describe('method #requestLogSize', function() {
+    it('should return the content length of a successful request', async function() {
+      // setup
+      sandbox.stub(global, 'fetch').returns(Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          has(header) {
+            return header.toLowerCase() === 'content-length';
+          },
+          get(header) {
+            return header.toLowerCase() === 'content-length' && 345;
+          }
+        }
+      }));
+      // test
+      const length = await tail.requestLogSize();
+      // verify
+      expect(length).to.eq(345);
+    });
+    it('should throw error when content-length is not found', async function() {
+      // setup
+      sandbox.stub(global, 'fetch').returns(Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          has: header => header.toLowerCase() !== 'content-length',
+          forEach: () => [],
+          get: () => null,
+        }
+      }));
+      // test
+      try {
+        await tail.requestLogSize();
+        throw new Error('It should have thrown an error!');
+      } catch (e) {
+        expect(e).to.be.instanceOf(MissingContentLengthHeaderError);
+      }
+    });
+    it('should throw error when resource does not exist', async function() {
+      // setup
+      sandbox.stub(global, 'fetch').returns(Promise.resolve({
+        ok: false,
+        status: 404,
+      }));
+      // test
+      try {
+        await tail.requestLogSize();
+        throw new Error('It should have thrown an error!');
+      } catch (e) {
+        expect(e).to.be.instanceOf(ResourceNotFoundError);
+      }
+    });
+    it('should throw error when server responds with a code that\' neither 404 or 200', async function() {
+      // setup
+      sandbox.stub(global, 'fetch').returns(Promise.resolve({
+        ok: false,
+        status: 501,
+      }));
+      // test
+      try {
+        await tail.requestLogSize();
+        throw new Error('It should have thrown an error!');
+      } catch (e) {
+        expect(e).to.be.instanceOf(UnexpectedServerResponseError);
+      }
+    });
+    it('should throw error when a network error occurs', async function() {
+      // setup
+      sandbox.stub(global, 'fetch').throws(new Error('Failed to connect!'));
+      // test
+      try {
+        await tail.requestLogSize();
+        throw new Error('It should have thrown an error!');
+      } catch (e) {
+        expect(e).to.be.instanceOf(HeadRequestError);
+      }
     });
   });
 });
